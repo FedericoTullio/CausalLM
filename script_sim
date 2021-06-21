@@ -1,0 +1,222 @@
+# 21/06/2020
+################################################################################
+# "Causal inference for time-varying treatments in latent Markov models: An 
+#  application to the effects of remittances on poverty dynamics",
+# Tullio, F. and Bartolucci, F.
+
+# Run this code to implement the stepwise estimation (Section 4.2.3) strategy on generated data.
+# Data are generated according to the parameters described in Section 5 (Simulation study),
+# using the function draw_lm_cov_latent from the "LMest" package.
+# Required packages: readstata13, LMest, MultiLCIRT
+
+rm(list=ls())
+
+# Set the following path.
+# (data_path: directory where data.dta is saved)
+
+load("data_path/data.RData")
+
+# Description of the data
+n  = 1000 # sample size
+TT = 3    # time periods
+J  = 6    # n. of observable outcomes
+# Arrays:
+# Y:   manifest outcomes, array of dimension nxTxJ
+# T1,x1: treatment variable and exogenous covariate at t = 1
+# T2,x2: treatment variable and exogenous covariate at t=2,3; arrays of dimension nx(T-1)
+
+library(LMest)
+library(MultiLCIRT)
+
+# Tolerance level and number of bootstrap replications
+tol = 10^-12
+BB = 100
+set.seed(BB)
+
+################################################################################
+# Computation of unit-specific weights as described by Eq. (3) 
+
+Pr1 = glm(T1 ~ x1, family = binomial())
+Pr2 = glm(T2[,1] ~ x2[,1], family = binomial())
+Pr3 = glm(T2[,2] ~ x2[,2], family = binomial())
+Ps1 = Pr1$fitted.values^T1*(1-Pr1$fitted.values)^(1-T1)
+Ps2 = Pr2$fitted.values^T2[,1]*(1-Pr2$fitted.values)^(1-T2[,1])
+Ps3 = Pr3$fitted.values^T2[,2]*(1-Pr3$fitted.values)^(1-T2[,2])
+w = 1/(Ps1*Ps2*Ps3)
+rm(Pr1, Pr2, Pr3, Ps1, Ps2, Ps3)
+
+# Thresholding the weights
+w[w>quantile(w,.99)] = quantile(w,.99)
+
+################################################################################
+# Stepwise approach
+
+# Reshape the observable outcomes
+Ys = matrix(NA,n*TT,J)
+for (m in 1:6) Ys[,m] = c(Y[,,m])
+
+# Fit an LC model on the pooled data
+est = est_multi_poly(Ys,k=2,tol=tol,output=T)
+
+# Reshape the conditional response probabilities
+Ki = array(NA,dim=c(2,2,6))
+for (m in 1:6) Ki[,,m] = cbind(est$Phi[,m,1],est$Phi[,m,2])
+
+# Fit an LM model with the conditional response probabilities treated as fixed parameters
+est_stw = est_lm_cov_latent(Y,T1,T2,w,Psi=Ki,fixPsi=TRUE,k=2,output=T,tol=tol)
+
+# From the estimated response probabilities (est$Phi or est_stw$Psi)
+# we observe that units belonging tothe first class show 
+# lower probability of "success" in each item
+
+################################################################################
+
+# Estimated average transition matrix
+PI  = apply(est_stw$PI[,,,2:TT],c(1,2),mean)
+# Transition matrix for treated households (\Pi^1)
+PI1 = est_stw$PI[,,which(T2[,1]==1)[1],2]
+# Transition matrix for nontreated households (\Pi^0)
+PI0 = est_stw$PI[,,which(T2[,1]==0)[1],2]
+
+# Estimated average initial probabilities
+IP  = apply(est_stw$Piv,2,mean)
+# Initial probabilities for treated households
+IP1 = est_stw$Piv[which(T1==1)[1],]
+# Initial probabilities for nontreated households
+IP0 = est_stw$Piv[which(T1==0)[1],]
+
+# Recall that units belonging to class 2 show higher probabilities of success.
+# Define CATEs accordingly.
+
+# ATE_1, CATE_1 and CATE_2 
+ate1  = round(IP1 - IP0,3)[1]
+cate2 = round((PI1-PI0),3)[1,1]
+cate1 = round((PI1-PI0),3)[2,1]
+
+################################################################################
+# Estimating 95% C.I.s of the model parameters with a nonparametric bootstrap
+
+# Defining the vectors
+se    = matrix(NA,3,BB)
+sePI1 = array(NA,dim=c(2,2,BB))
+sePI0 = array(NA,dim=c(2,2,BB))
+sePI  = array(NA,dim=c(2,2,BB))
+seIP  = matrix(NA,2,BB)
+sePSI = matrix(NA,length(c(est$Phi)),BB)
+
+seape2  = array(NA,BB)
+seape3  = array(NA,BB)
+
+
+seapey1 = array(NA,BB)
+
+
+for (b in 1:BB){
+  sink("NUL")
+
+  ind = sample(1:n,n,replace=TRUE)
+  ind2 = sort(c(3*(ind-1)+1,3*(ind-1)+2,3*(ind-1)+3))
+  
+  SS_cr = Ys[ind2,]
+  XX1 = T1[ind]; XX2 = T2[ind,]; SS = Y[ind,,]
+  
+  # Step 1
+  
+  Pr1 = glm(XX1 ~ x1[ind], family = binomial())
+  Pr2 = glm(XX2[,1] ~ x2[ind,1], family = binomial())
+  Pr3 = glm(XX2[,2] ~ x2[ind,2], family = binomial())
+  
+  Ps1 = Pr1$fitted.values^XX1*(1-Pr1$fitted.values)^(1-XX1)
+  Ps2 = Pr2$fitted.values^XX2[,1]*(1-Pr2$fitted.values)^(1-XX2[,1])
+  Ps3 = Pr3$fitted.values^XX2[,2]*(1-Pr3$fitted.values)^(1-XX2[,2])
+  
+  ww = 1/(Ps1*Ps2*Ps3)
+  
+  ww[ww>quantile(ww,.99)] = quantile(ww,.99)
+  
+  rm(Pr1, Pr2, Pr3, Ps1, Ps2, Ps3)
+  
+  # Step 2
+  
+  B = est_multi_poly(SS_cr,k=2,Phi=est$Phi)
+  
+  sePSI[,b] = c(B$Phi)
+  
+  Kk = array(NA,dim=c(2,2,6))
+  for (m in 1:6) Kk[,,m] = cbind(B$Phi[,m,1],B$Phi[,m,2])
+  
+  C = est_lm_cov_latent(SS,XX1,XX2,yv=ww,k=2,maxit=1500,start=2,output=TRUE,
+                        Psi = Kk, fixPsi = TRUE,
+                        Be  = est_stw$Be,
+                        Ga  = est_stw$Ga)
+  
+  seape2[b] = (C$Piv[which(XX1==1)[1],]%*%C$PI[,,which(XX2[,1]==1)[1],2] -
+                 C$Piv[which(XX1==0)[1],]%*%C$PI[,,which(XX2[,1]==0)[1],2])[1]
+  seape3[b] = (C$Piv[which(XX1==1)[1],]%*%C$PI[,,which(XX2[,1]==1)[1],2]%*%C$PI[,,which(XX2[,1]==1)[1],2] -
+                 C$Piv[which(XX1==0)[1],]%*%C$PI[,,which(XX2[,1]==0)[1],2]%*%C$PI[,,which(XX2[,1]==0)[1],2])[1]
+  
+  sePI[,,b] = apply(C$PI[,,,2:TT],c(1,2),mean)
+  sePI1[,,b]= C$PI[,,which(XX2[,1]==1)[1],2]
+  sePI0[,,b]= C$PI[,,which(XX2[,1]==0)[1],2]
+  seIP[,b]  = apply(C$Piv,2,mean)
+  
+  se[,b]  = c ( (C$Piv[which(XX1==1)[1],1] - C$Piv[which(XX1==0)[1],1]),
+                (sePI1[,,b]-sePI0[,,b])[1,1],
+                (sePI1[,,b]-sePI0[,,b])[2,1] )
+  
+  seapey1[b] = ((C$Psi[1,,1])%*%matrix(c(1,-1),2,1))*se[2,b]
+
+  sink()
+  if (b %% 10 == 0) print(b)
+}
+
+rm(B,C,ind,XX1,XX2,ww,SS)
+
+# RESULTS #####################################################################
+
+# Conditional responses and 95% c.i. 
+# Nonpoor class
+round(est$Phi[,,1],3)
+round(array(apply(sePSI[1:12,],1,quantile,.025,na.rm=T),dim=c(2,6)),3)
+round(array(apply(sePSI[1:12,],1,quantile,.975,na.rm=T),dim=c(2,6)),3)
+# Poor class
+round(est$Phi[,,2],3)
+round(array(apply(sePSI[13:24,],1,quantile,.025,na.rm=T),dim=c(2,6)),3)
+round(array(apply(sePSI[13:24,],1,quantile,.975,na.rm=T),dim=c(2,6)),3)
+
+# CATE_2 and 95% c.i. 
+round(est_stw$PI[,,3,2]-est_stw$PI[,,2,2],3)[1]
+round(quantile(se[2,],c(.025,.975)),3)
+
+# CATE_1 and 95% c.i. 
+round(est_stw$PI[,,3,2]-est_stw$PI[,,2,2],3)[2]
+round(quantile(se[3,],c(.025,.975)),3)
+
+
+# Transition matrices 
+round(PI1,3)
+round(apply(sePI1[,,1:BB],c(1,2),quantile,c(.025)),3)
+round(apply(sePI1[,,1:BB],c(1,2),quantile,c(.975)),3)
+
+round(PI0,3)
+round(apply(sePI0[,,1:BB],c(1,2),quantile,c(.025)),3)
+round(apply(sePI0[,,1:BB],c(1,2),quantile,c(.975)),3)
+
+
+# ATE_1 and 95% c.i. 
+round(IP1 - IP0,3)[1]
+round(quantile(se[1,],c(.025,.975)),3)
+# ATE_2 and 95% c.i. 
+round(IP1%*%PI1 - IP0%*%PI0,3)[1]
+round(quantile(seape2,c(.025,.975)),3)
+# ATE_3 and 95% c.i. 
+round(IP1%*%PI1%*%PI1 - IP0%*%PI0%*%PI0,3)[1]
+round(quantile(seape3,c(.025,.975)),3)
+
+# Example of causal effect on the first manifest outcome 
+round((est_stw$Psi[1,,1])%*%matrix(c(1,-1),2,1)*cate2,3)
+round(quantile(seapey1,c(.025,.975)),3)
+# Interpretation: negative treatment effect on the probability of failure
+# (equivalently, positive treatment effect on the probability of success), 
+# conditional on belonging to class 1 at t-1
+
